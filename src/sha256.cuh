@@ -3,6 +3,7 @@
 #include <device_bitmanip.cuh>
 #include <cuda/std/array>
 #include <cuda/std/span>
+#include <cuda/std/mdspan>
 #include <cuda/std/cmath>
 #include <cassert>
 #include <cstdint>
@@ -125,6 +126,43 @@ __device__ struct sha256state sha256(cuda::std::span<const uint8_t, MessageLen> 
 }
 
 template <size_t MessageLen>
+__device__ void sha256partial(cuda::std::span<const uint8_t, MessageLen> msg, struct sha256state& current_state) {
+    constexpr size_t n_full_chunks = MessageLen / 64;
+    constexpr size_t bytes_in_last_chunk = MessageLen % 64;
+    constexpr size_t last_chunk_buffer_multiple = (bytes_in_last_chunk + 9) <= 64 ? 1 : 2;
+    constexpr uint64_t msg_size_bits = static_cast<uint64_t>(MessageLen) * 8;
+
+    struct sha256state s = current_state;
+
+    cuda::std::array<uint32_t, 16> W_circular;
+    
+    for (int chunk = 0; chunk < n_full_chunks; chunk++) {
+        for (size_t chunk_words = 0; chunk_words < 16; chunk_words++) {
+            W_circular[chunk_words] = swap_endianness(*(reinterpret_cast<const uint32_t*>(&msg[chunk * 64 + chunk_words * sizeof(uint32_t)])));
+        }
+        sha256_chunk(s, W_circular);
+    }
+
+    cuda::std::array<uint8_t, last_chunk_buffer_multiple * 64> last_chunk_buffer = {0};
+    #pragma unroll
+    for (size_t i = 0; i < bytes_in_last_chunk; i++) { last_chunk_buffer[i] = msg[n_full_chunks * 64 + i]; }
+    last_chunk_buffer[bytes_in_last_chunk] = 0x80;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) { last_chunk_buffer[last_chunk_buffer.size() - 1 - i] = static_cast<uint8_t>(msg_size_bits >> (8 * i)); }
+
+    #pragma unroll
+    for (int chunk = 0; chunk < last_chunk_buffer_multiple; chunk++) {
+        #pragma unroll
+        for (size_t chunk_words = 0; chunk_words < 16; chunk_words++) {
+            W_circular[chunk_words] = swap_endianness(*(reinterpret_cast<const uint32_t*>(&last_chunk_buffer[chunk * 64 + chunk_words * sizeof(uint32_t)])));
+        }
+        sha256_chunk(s, W_circular);
+    }
+
+    return s;
+}
+
+template <size_t MessageLen>
 __global__ void sha256_hash(cuda::std::span<const cuda::std::span<uint8_t, MessageLen>> msgs, cuda::std::span<struct sha256state> out) {
     assert(out.size() == msgs.size());
     
@@ -138,5 +176,17 @@ __global__ void sha256_hash(cuda::std::span<const cuda::std::span<uint8_t, Messa
         if (idx < out.size()) {
             out[idx] = sha256<MessageLen>(msgs[idx]);
         }
+    }
+}
+
+template <size_t MessageLen>
+__global__ void sha256_hash(
+    cuda::std::mdspan<const std::uint8_t, cuda::std::extents<size_t, cuda::std::dynamic_extent, MessageLen>> msgs, cuda::std::span<struct sha256state> out) {
+    assert(out.size() == msgs.extent(0));
+
+    for (size_t idx = THREAD_ID_1D; idx < out.size(); idx += THREAD_COUNT_1D) {
+        cuda::std::span<const std::uint8_t, MessageLen> msg(&msgs(idx, 0), MessageLen);
+        
+        out[idx] = sha256<MessageLen>(msg);
     }
 }

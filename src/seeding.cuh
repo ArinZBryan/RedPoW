@@ -20,8 +20,8 @@ __device__ void digits_to_be_utf8_words(uint64_t n, cuda::std::span<uint32_t, 3>
         const size_t word = i / digits_per_word;
         const size_t byte_position_in_word = i % digits_per_word;
         const size_t bit_position_in_word = byte_position_in_word * 8;
-        const uint32_t digit = ('0' + n % 10);
-        out[word] |= digit << 24 - bit_position_in_word; 
+        const uint8_t digit = ('0' + n % 10);
+        out[word] |= static_cast<uint32_t>(digit) << 24 - bit_position_in_word; 
         n /= 10;
     }
 }
