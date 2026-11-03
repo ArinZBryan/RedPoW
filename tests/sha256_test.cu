@@ -200,7 +200,7 @@ TEST_CASE("Sha256 Implementation is correct", "[sha256]") {
 
         // Allocate the actual buffer for the data
         uint8_t* data_ptr = nullptr;
-        cudaMallocManaged(&data_ptr, num_messages * sizeof(uint8_t));
+        cudaMallocManaged(&data_ptr, num_messages * 2 * sizeof(uint8_t));
         
         // Allocate the actual buffer for the states
         struct sha256state* state_ptr = nullptr;
@@ -374,7 +374,7 @@ TEST_CASE("Sha256 Implementation is correct", "[sha256]") {
 
         // Allocate the actual buffer for the data
         uint8_t* data_ptr = nullptr;
-        cudaMallocManaged(&data_ptr, num_messages * sizeof(uint8_t));
+        cudaMallocManaged(&data_ptr, num_messages * 2 * sizeof(uint8_t));
         
         // Allocate the actual buffer for the states
         struct sha256state* state_ptr = nullptr;
@@ -399,6 +399,68 @@ TEST_CASE("Sha256 Implementation is correct", "[sha256]") {
             REQUIRE(sha256stateseq(correct[hash_no], states[hash_no]));
         }
 
+        cudaFree(data_ptr);
+        cudaFree(state_ptr);
+    }
+
+    SECTION("Hashing a much larger message with mdspan") {
+
+        /*Taken from https://en.wikipedia.org/wiki/Sovetsky_Soyuz-class_battleship*/
+        const char message[] = 
+            "The Sovetsky Soyuz-class battleships (Project 23, Russian: Советский Союз, "
+            "\'Soviet Union\'), also known as \"Stalin\'s Republics\", were a class of "
+            "battleships begun by the Soviet Union in the late 1930s but never brought "
+            "into service. They were designed in response to the Bismarck-class battleships "
+            "being built by Germany.\nThese ships would have rivaled the Imperial Japanese "
+            "Yamato class and America\'s planned Montana class in size if any had been "
+            "completed, although with significantly weaker firepower: nine 406-millimeter "
+            "(16 in) guns compared to the nine 460-millimeter (18.1 in) guns of the Japanese "
+            "ships and a dozen 16-inch (406 mm) on the Montanas. The failure of the Soviet "
+            "armor plate industry to build cemented armor plates thicker than 230 millimeters "
+            "(9.1 in) would have negated any combat advantages from the Sovetsky Soyuz "
+            "class\'s thicker armor.\nConstruction of the first four ships was plagued "
+            "with difficulties as the Soviet shipbuilding and related industries were not "
+            "prepared to build such large ships. One battleship, Sovetskaya Belorussiya, was "
+            "cancelled on 19 October 1940 after serious construction flaws were found. "
+            "Construction of the other three ships was suspended shortly after Nazi Germany "
+            "invaded the Soviet Union in June 1941, and never resumed. All three of the "
+            "surviving hulls were scrapped in the late 1940s.";
+
+        // Length excludes the string literal's trailing NUL
+        constexpr size_t message_len = sizeof(message) - 1;
+
+        // Reference hash computed with Python's hashlib.sha256 over the UTF-8 bytes above
+        constexpr struct sha256state correct = {
+            0xc60353ca,
+            0x54e48c2d,
+            0xef7376bf,
+            0x8981a4b3,
+            0xbf840329,
+            0x60a5e09e,
+            0xaf161835,
+            0xbf53231b
+        };
+
+
+        // Allocate the actual buffer for the data
+        uint8_t* data_ptr = nullptr;
+        cudaMallocManaged(&data_ptr, message_len);
+        
+        // Allocate the actual buffer for the states
+        struct sha256state* state_ptr = nullptr;
+        cudaMallocManaged(&state_ptr, sizeof(sha256state));
+
+        auto datas = cuda::std::mdspan<uint8_t, cuda::std::extents<size_t, cuda::std::dynamic_extent, message_len>>(data_ptr, 1);
+        cudaMemcpy(data_ptr, message, message_len, cudaMemcpyDefault);
+         
+        auto states = cuda::std::span<struct sha256state>(state_ptr, 1);
+
+        sha256_hash<message_len><<<1, 1>>>(datas, states);
+        REQUIRE(cudaGetLastError() == cudaSuccess);
+        REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+
+        REQUIRE(sha256stateseq(correct, states[0]));
+        
         cudaFree(data_ptr);
         cudaFree(state_ptr);
     }
