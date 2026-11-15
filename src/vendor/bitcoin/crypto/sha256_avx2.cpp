@@ -8,7 +8,7 @@
 #include <immintrin.h>
 
 #include <attributes.h>
-#include <crypto/common.h>
+#include <vendor/bitcoin/crypto/common.h>
 
 namespace sha256d64_avx2 {
 namespace {

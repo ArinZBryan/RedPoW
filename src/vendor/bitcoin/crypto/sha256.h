@@ -12,10 +12,9 @@
 /** A hasher class for SHA-256. */
 class CSHA256
 {
-    private:
-    unsigned char buf[64];
     
     public:
+    unsigned char buf[64];
     uint32_t s[8];
     uint64_t bytes{0};
     static constexpr size_t OUTPUT_SIZE{32};
