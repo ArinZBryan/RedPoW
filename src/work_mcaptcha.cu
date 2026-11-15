@@ -24,8 +24,6 @@ std::optional<mCaptchaResult> do_mCaptcha_singlethreaded_cpu(std::u8string_view 
     assert(phrase.size() == 32);    // mCaptcha enforces that the phrase is a 32-character utf-8 alphanumeric string
 
     const size_t total_length = salt.size() + sizeof(uint64_t) + phrase.size();
-    const size_t total_full_frames = total_length / 64;
-    const size_t partial_frame_size = total_length % 64;
     constexpr uint64_t phrase_length = 32; 
     const __uint128_t target = threshold(difficulty);
 
@@ -137,7 +135,6 @@ std::optional<struct mCaptchaResult> do_mCaptcha_gpu(std::u8string_view salt, st
     constexpr uint64_t phrase_length = 32; 
     const __uint128_t target = threshold(difficulty);
 
-    unsigned char hash[32] = {0};
     CSHA256 hasher = CSHA256();
     hasher.Write(reinterpret_cast<const unsigned char*>(salt.data()), salt.size());
     hasher.Write(reinterpret_cast<const unsigned char*>(&phrase_length), sizeof(uint64_t));

@@ -5,6 +5,7 @@
 #include <cuda/std/array>
 
 #include <vendor/bitcoin/crypto/sha256.h>
+#include <vendor/bitcoin/compat/endian.h>
 
 #include <sha256.cuh>
 #include <utility.cuh>
@@ -85,22 +86,18 @@ __device__ bool d_unit_of_work_js(cuda::std::span<const uint8_t> remaining_seed,
 
 __device__ bool d_unit_of_work_wasm(cuda::std::span<const uint8_t> remaining_seed, uint32_t nonce, struct sha256state& partial_state, size_t bits_hashed_so_far, uint difficulty, bool nonce_is_little_endian) {
     
-    // the nonce is appended to the seed as ASCII decimal digits (matches poc.py: seed + str(i))
-    constexpr size_t max_nonce_digits = 20; // digits in UINT64_MAX
+    // the nonce is appended to the seed as 4 raw bytes, little- or big-endian depending on the seed
     constexpr size_t max_remaining_seed = 64; // seed bytes left over after the full chunks were hashed
     assert(remaining_seed.size() <= max_remaining_seed);
 
-    cuda::std::array<uint8_t, max_remaining_seed + max_nonce_digits> msg;
+    cuda::std::array<uint8_t, max_remaining_seed + sizeof(uint32_t)> msg;
     cuda::std::memcpy(msg.data(), remaining_seed.data(), remaining_seed.size());
-
-    size_t digits = 1;
-    for (uint64_t n = nonce; n >= 10; n /= 10) digits++;
 
     uint32_t nonce_bits = nonce_is_little_endian ? nonce : swap_endianness(nonce);
     cuda::std::memcpy(&msg[remaining_seed.size()], &nonce_bits, sizeof(uint32_t));
     
     const struct sha256state result = sha256partial(
-        cuda::std::span<const uint8_t>(msg.data(), remaining_seed.size() + digits),
+        cuda::std::span<const uint8_t>(msg.data(), remaining_seed.size() + sizeof(uint32_t)),
         partial_state,
         bits_hashed_so_far
     );
@@ -273,7 +270,7 @@ std::optional<uint64_t> do_anubis_wasm_singlethreaded_cpu(const std::span<uint8_
         hasher = saved_state;
         hasher.Write(reinterpret_cast<const unsigned char*>(seed.data() + n_full_chunks * 64), bytes_in_last_chunk);
 
-        uint32_t nonce_bits = nonce_is_little_endian ? nonce : swap_endianness(nonce);
+        uint32_t nonce_bits = nonce_is_little_endian ? nonce : htobe32_internal(nonce);
         hasher.Write(reinterpret_cast<const unsigned char*>(&nonce_bits), sizeof(uint32_t));
 
         hasher.Finalize(hash);
@@ -311,7 +308,7 @@ std::optional<uint64_t> do_anubis_wasm_gpu(const std::span<uint8_t>& seed, uint3
     uint64_t* d_found_nonce = nullptr;
     cudaMallocManaged(&d_found_nonce, sizeof(uint64_t));
 
-    auto[gridSize, blockSize] = getBestBigKernelLaunchParams(k_work_js);
+    auto[gridSize, blockSize] = getBestBigKernelLaunchParams(k_work_wasm);
 
     k_work_wasm<<<gridSize, blockSize>>>(
         d_remaining_seed,
