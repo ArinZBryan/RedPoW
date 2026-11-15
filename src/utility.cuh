@@ -17,3 +17,23 @@
 #define THREAD_ID_1D THREAD_INDEX_IN_GRID_1D
 #define THREAD_ID_3D THREAD_INDEX_IN_GRID_3D
 
+template <typename... Ts>
+std::pair<int, int> getBestBigKernelLaunchParams(void (*kernel)(Ts...)) {
+    int deviceId;
+    cudaGetDevice(&deviceId);
+
+    int numSMs;
+    cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, deviceId);
+
+    int blockSize = 256;
+    // Query the exact max active blocks per SM for your specific kernel
+    int maxBlocksPerSM = 0;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &maxBlocksPerSM, kernel, blockSize, 0
+    );
+
+    // Multiply by a small wave factor (e.g., 4 to 16 waves) to hide latency and prevent tail effects
+    int gridSize = numSMs * maxBlocksPerSM * 8;
+
+    return std::make_pair(gridSize, blockSize);
+}
