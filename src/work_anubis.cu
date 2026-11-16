@@ -121,7 +121,7 @@ __global__ void k_work_js(
     size_t thread_id = THREAD_ID_1D;
     size_t stride = THREAD_COUNT_IN_GRID_1D;
 
-    for (uint64_t nonce = thread_id; nonce < d_num_nonces; nonce += stride) {
+    for (uint64_t nonce = thread_id; nonce <= d_num_nonces; nonce += stride) {
         if (__ldcg(d_found_flag)) { // the __ldcg intrinsic generates a load that bypasses the L1 cache, and prevents stale values from being read.
             return;
         }
@@ -150,7 +150,7 @@ __global__ void k_work_wasm(
     size_t thread_id = THREAD_ID_1D;
     size_t stride = THREAD_COUNT_IN_GRID_1D;
 
-    for (uint32_t nonce = thread_id; nonce < d_num_nonces; nonce += stride) {
+    for (uint32_t nonce = thread_id; nonce <= d_num_nonces; nonce += stride) {
         if (__ldcg(d_found_flag)) { // the __ldcg intrinsic generates a load that bypasses the L1 cache, and prevents stale values from being read.
             return;
         }
@@ -177,7 +177,7 @@ std::optional<uint64_t> do_anubis_js_singlethreaded_cpu(const std::span<uint8_t>
 
     unsigned char hash[32] = {0};
 
-    for (uint64_t nonce = 0; nonce < nonce_max; nonce++) {
+    for (uint64_t nonce = 0; nonce <= nonce_max; nonce++) {
         hasher = saved_state;
         hasher.Write(reinterpret_cast<const unsigned char*>(seed.data() + n_full_chunks * 64), bytes_in_last_chunk);
         
@@ -266,7 +266,7 @@ std::optional<uint64_t> do_anubis_wasm_singlethreaded_cpu(const std::span<uint8_
 
     unsigned char hash[32] = {0};
 
-    for (uint32_t nonce = 0; nonce < nonce_max; nonce++) {
+    for (uint32_t nonce = 0; nonce <= nonce_max; nonce++) {
         hasher = saved_state;
         hasher.Write(reinterpret_cast<const unsigned char*>(seed.data() + n_full_chunks * 64), bytes_in_last_chunk);
 

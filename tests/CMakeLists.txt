@@ -16,6 +16,7 @@ file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
 
 add_executable(RedPoWTests ${TEST_SOURCES})
 target_link_libraries(RedPoWTests PRIVATE RedPoWCore Catch2::Catch2WithMain)
+target_include_directories(RedPoWTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 set_target_properties(RedPoWTests PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON

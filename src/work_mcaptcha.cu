@@ -23,8 +23,9 @@ constexpr __uint128_t threshold(uint32_t difficultyFactor) {
 std::optional<mCaptchaResult> do_mCaptcha_singlethreaded_cpu(std::u8string_view salt, std::u8string_view phrase, uint32_t difficulty, uint64_t nonce_max) {
     assert(phrase.size() == 32);    // mCaptcha enforces that the phrase is a 32-character utf-8 alphanumeric string
 
+    if (difficulty == 0) { return std::nullopt; }
     const size_t total_length = salt.size() + sizeof(uint64_t) + phrase.size();
-    constexpr uint64_t phrase_length = 32; 
+    constexpr uint64_t phrase_length = 32;
     const __uint128_t target = threshold(difficulty);
 
     unsigned char hash[32] = {0};
@@ -38,7 +39,7 @@ std::optional<mCaptchaResult> do_mCaptcha_singlethreaded_cpu(std::u8string_view 
     __uint128_t s = 0;
     while (s < target) {
         hasher = saved_state;
-        if (nonce > nonce_max) { return std::nullopt; }
+        if (nonce >= nonce_max) { return std::nullopt; }
         nonce++;
 
         cuda::std::array<uint8_t, 20> digitbuf = cuda::std::array<uint8_t, 20>();
@@ -138,8 +139,10 @@ __global__ void k_work(
 
 std::optional<struct mCaptchaResult> do_mCaptcha_gpu(std::u8string_view salt, std::u8string_view phrase, uint32_t difficulty, uint64_t nonce_max) {
     assert(phrase.size() == 32);    // mCaptcha enforces that the phrase is a 32-character utf-8 alphanumeric string
+    if (difficulty == 0) { return std::nullopt; }
 
     const size_t total_length = salt.size() + sizeof(uint64_t) + phrase.size();
+    const size_t no_full_chunks = total_length / 64;
     const size_t bytes_in_last_chunk = total_length % 64;
     constexpr uint64_t phrase_length = 32; 
     const __uint128_t target = threshold(difficulty);
@@ -171,7 +174,7 @@ std::optional<struct mCaptchaResult> do_mCaptcha_gpu(std::u8string_view salt, st
         d_remaining_seed,
         nonce_max,
         d_partial_state,
-        hasher.bytes * 8,
+        no_full_chunks * 64 * 8,
         target,
         d_found_flag,
         d_found_result
