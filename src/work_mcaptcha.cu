@@ -53,7 +53,9 @@ std::optional<mCaptchaResult> do_mCaptcha_singlethreaded_cpu(std::u8string_view 
         }
         hasher.Write(digitbuf.data(), digits);
         hasher.Finalize(hash);
-        cuda::std::memcpy(&s, hash, 16);
+        // the score is the first 16 bytes of the digest read as a big-endian integer
+        s = 0;
+        for (size_t i = 0; i < 16; i++) s = (s << 8) | hash[i];
     }
 
     return mCaptchaResult{ nonce, s };
@@ -83,13 +85,20 @@ __device__ std::optional<__uint128_t> d_unit_of_work(cuda::std::span<const uint8
         bits_hashed_so_far
     );
 
-    const cuda::std::array<uint32_t, 8> words = {
+    /*const cuda::std::array<uint32_t, 8> words = {
         result.a, result.b, result.c, result.d, result.e, result.f, result.g, result.h
-    };
+    };*/
 
     __uint128_t upper_bits = 0;
-    cuda::std::memcpy(&upper_bits, words.data(), 16);
-    if (upper_bits > target) {
+    // words is a big endian 256 bit number
+    // convert the upper 128 bits to a little endian integer
+    upper_bits =
+        static_cast<__uint128_t>(swap_endianness(result.d))       | 
+        static_cast<__uint128_t>(swap_endianness(result.c)) << 32 | 
+        static_cast<__uint128_t>(swap_endianness(result.b)) << 64 | 
+        static_cast<__uint128_t>(swap_endianness(result.a)) << 96;
+
+    if (upper_bits >= target) {
         return upper_bits;
     }
     return std::nullopt;
@@ -102,14 +111,14 @@ __global__ void k_work(
     uint64_t d_num_nonces, 
     struct sha256state* d_partial_state, 
     size_t d_bits_hashed_so_far, 
-    uint d_target, 
+    __uint128_t d_target, 
     int* d_found_flag,
     struct mCaptchaResult* d_found_nonce
 ) {
     size_t thread_id = THREAD_ID_1D;
     size_t stride = THREAD_COUNT_IN_GRID_1D;
 
-    for (uint64_t nonce = thread_id; nonce < d_num_nonces; nonce += stride) {
+    for (uint64_t nonce = thread_id + 1; nonce <= d_num_nonces; nonce += stride) {
         if (__ldcg(d_found_flag)) { // the __ldcg intrinsic generates a load that bypasses the L1 cache, and prevents stale values from being read.
             return;
         }

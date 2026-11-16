@@ -163,7 +163,7 @@ def flags_in_effect(args) -> str:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        prog="RedPow CPU PoC",
+        prog="RedPow Anubis CPU PoC",
         description="Implements some hashing functionality required for ReadPoW testing"
     )
 
