@@ -11,6 +11,8 @@
 #include <utility.cuh>
 #include <device_bitmanip.cuh>
 
+#include <iostream>
+
 __host__ __device__ uint hash_countl_zero(cuda::std::span<const uint32_t, 8> hash) {
     uint total_zeroes = 0;
     constexpr int bits_per_chunk = 64;
@@ -60,7 +62,8 @@ __device__ bool d_unit_of_work_js(cuda::std::span<const uint8_t> remaining_seed,
     assert(remaining_seed.size() <= max_remaining_seed);
 
     cuda::std::array<uint8_t, max_remaining_seed + max_nonce_digits> msg;
-    cuda::std::memcpy(msg.data(), remaining_seed.data(), remaining_seed.size());
+    if (!remaining_seed.empty())
+        cuda::std::memcpy(msg.data(), remaining_seed.data(), remaining_seed.size());
 
     size_t digits = 1;
     for (uint64_t n = nonce; n >= 10; n /= 10) digits++;
@@ -91,7 +94,8 @@ __device__ bool d_unit_of_work_wasm(cuda::std::span<const uint8_t> remaining_see
     assert(remaining_seed.size() <= max_remaining_seed);
 
     cuda::std::array<uint8_t, max_remaining_seed + sizeof(uint32_t)> msg;
-    cuda::std::memcpy(msg.data(), remaining_seed.data(), remaining_seed.size());
+    if (!remaining_seed.empty())
+        cuda::std::memcpy(msg.data(), remaining_seed.data(), remaining_seed.size());
 
     uint32_t nonce_bits = nonce_is_little_endian ? nonce : swap_endianness(nonce);
     cuda::std::memcpy(&msg[remaining_seed.size()], &nonce_bits, sizeof(uint32_t));
@@ -150,12 +154,12 @@ __global__ void k_work_wasm(
     size_t thread_id = THREAD_ID_1D;
     size_t stride = THREAD_COUNT_IN_GRID_1D;
 
-    for (uint32_t nonce = thread_id; nonce <= d_num_nonces; nonce += stride) {
+    for (uint64_t nonce = thread_id; nonce <= d_num_nonces; nonce += stride) {
         if (__ldcg(d_found_flag)) { // the __ldcg intrinsic generates a load that bypasses the L1 cache, and prevents stale values from being read.
             return;
         }
         
-        if (d_unit_of_work_wasm(d_remaining_seed, nonce, *d_partial_state, d_bits_hashed_so_far, d_difficulty, d_nonce_is_little_endian)) {
+        if (d_unit_of_work_wasm(d_remaining_seed, static_cast<uint32_t>(nonce), *d_partial_state, d_bits_hashed_so_far, d_difficulty, d_nonce_is_little_endian)) {
             int someones_already_found_it = atomicCAS(d_found_flag, false, true);
             if (!someones_already_found_it) {
                 *d_found_nonce = nonce;
@@ -211,14 +215,16 @@ std::optional<uint64_t> do_anubis_js_gpu(const std::span<uint8_t>& seed, uint64_
     CSHA256 hasher = CSHA256();
     hasher.Write(reinterpret_cast<const unsigned char*>(seed.data()), n_full_chunks * 64);
     uint8_t* d_remaining_seed_buf = nullptr;
-    cudaMallocManaged(&d_remaining_seed_buf, sizeof(uint8_t) * bytes_in_last_chunk);
-    cuda::std::memcpy(d_remaining_seed_buf, seed.data() + n_full_chunks * 64, bytes_in_last_chunk);
+    if (bytes_in_last_chunk > 0) {
+        cudaMallocManaged(&d_remaining_seed_buf, sizeof(uint8_t) * bytes_in_last_chunk);
+        cudaMemcpy(d_remaining_seed_buf, seed.data() + n_full_chunks * 64, bytes_in_last_chunk, cudaMemcpyDefault);
+    }
     auto d_remaining_seed = cuda::std::span<const uint8_t>(d_remaining_seed_buf, bytes_in_last_chunk); 
     
 
     struct sha256state* d_partial_state = nullptr;
     cudaMallocManaged(&d_partial_state, sizeof(struct sha256state));
-    cuda::std::memcpy(d_partial_state, &hasher.s, sizeof(struct sha256state));
+    cudaMemcpy(d_partial_state, &(hasher.s), sizeof(struct sha256state), cudaMemcpyDefault);
 
     int* d_found_flag = nullptr;
     cudaMallocManaged(&d_found_flag, sizeof(int));
@@ -256,7 +262,7 @@ std::optional<uint64_t> do_anubis_js_gpu(const std::span<uint8_t>& seed, uint64_
 
 std::optional<uint64_t> do_anubis_wasm_singlethreaded_cpu(const std::span<uint8_t>& seed, uint32_t nonce_max, uint32_t difficulty) {
     size_t seed_byte_length = seed.end() - seed.begin();
-    bool nonce_is_little_endian = seed[seed.size() - 1] >= 128;
+    bool nonce_is_little_endian = seed.empty() ? false : seed[seed.size() - 1] >= 128;
     size_t n_full_chunks = seed_byte_length / 64;
     size_t bytes_in_last_chunk = seed_byte_length % 64;
 
@@ -266,11 +272,11 @@ std::optional<uint64_t> do_anubis_wasm_singlethreaded_cpu(const std::span<uint8_
 
     unsigned char hash[32] = {0};
 
-    for (uint32_t nonce = 0; nonce <= nonce_max; nonce++) {
+    for (uint64_t nonce = 0; nonce <= nonce_max; nonce++) {
         hasher = saved_state;
         hasher.Write(reinterpret_cast<const unsigned char*>(seed.data() + n_full_chunks * 64), bytes_in_last_chunk);
 
-        uint32_t nonce_bits = nonce_is_little_endian ? nonce : htobe32_internal(nonce);
+        uint32_t nonce_bits = nonce_is_little_endian ? static_cast<uint32_t>(nonce) : htobe32_internal(static_cast<uint32_t>(nonce));
         hasher.Write(reinterpret_cast<const unsigned char*>(&nonce_bits), sizeof(uint32_t));
 
         hasher.Finalize(hash);
@@ -284,7 +290,7 @@ std::optional<uint64_t> do_anubis_wasm_singlethreaded_cpu(const std::span<uint8_
 
 std::optional<uint64_t> do_anubis_wasm_gpu(const std::span<uint8_t>& seed, uint32_t nonce_max, uint32_t difficulty) {
     size_t seed_byte_length = seed.end() - seed.begin();
-    bool nonce_is_little_endian = seed[seed.size() - 1] >= 128;
+    bool nonce_is_little_endian = seed.empty() ? false : seed[seed.size() - 1] >= 128;
 
     size_t n_full_chunks = seed_byte_length / 64;
     size_t bytes_in_last_chunk = seed_byte_length % 64;
@@ -292,14 +298,16 @@ std::optional<uint64_t> do_anubis_wasm_gpu(const std::span<uint8_t>& seed, uint3
     CSHA256 hasher = CSHA256();
     hasher.Write(reinterpret_cast<const unsigned char*>(seed.data()), n_full_chunks * 64);
     uint8_t* d_remaining_seed_buf = nullptr;
-    cudaMallocManaged(&d_remaining_seed_buf, sizeof(uint8_t) * bytes_in_last_chunk);
-    cuda::std::memcpy(d_remaining_seed_buf, seed.data() + n_full_chunks * 64, bytes_in_last_chunk);
+    if (bytes_in_last_chunk > 0) {
+        cudaMallocManaged(&d_remaining_seed_buf, sizeof(uint8_t) * bytes_in_last_chunk);
+        cudaMemcpy(d_remaining_seed_buf, seed.data() + n_full_chunks * 64, bytes_in_last_chunk, cudaMemcpyDefault);
+    }
     auto d_remaining_seed = cuda::std::span<const uint8_t>(d_remaining_seed_buf, bytes_in_last_chunk); 
     
 
     struct sha256state* d_partial_state = nullptr;
     cudaMallocManaged(&d_partial_state, sizeof(struct sha256state));
-    cuda::std::memcpy(d_partial_state, &hasher.s, sizeof(struct sha256state));
+    cudaMemcpy(d_partial_state, &hasher.s, sizeof(struct sha256state), cudaMemcpyDefault);
 
     int* d_found_flag = nullptr;
     cudaMallocManaged(&d_found_flag, sizeof(int));

@@ -78,7 +78,12 @@ Catch::Generators::GeneratorWrapper<std::u8string> randomUTF8String(size_t min_l
     );
 }
 
-RandomCharsetUTF8StringGenerator::RandomCharsetUTF8StringGenerator(size_t min_length, size_t max_length, std::u32string charset) : m_rand(std::random_device{}()), charset(charset.begin(), charset.end()), m_codepoint_dist(0, charset.length()), m_length_dist(min_length, max_length) {
+RandomCharsetUTF8StringGenerator::RandomCharsetUTF8StringGenerator(size_t min_length, size_t max_length, std::u32string charset) : 
+    m_rand(std::random_device{}()), 
+    charset(charset.begin(), charset.end()), 
+    m_codepoint_dist(0, charset.length() - 1), 
+    m_length_dist(min_length, max_length)
+{
     static_cast<void>(next());
 }
 void RandomCharsetUTF8StringGenerator::append_utf8(std::u8string& out, uint32_t codepoint) const {

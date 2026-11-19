@@ -37,11 +37,8 @@ std::optional<mCaptchaResult> do_mCaptcha_singlethreaded_cpu(std::u8string_view 
 
     uint64_t nonce = 0;
     __uint128_t s = 0;
-    while (s < target) {
+    for (nonce = 1; nonce != 0 && nonce <= nonce_max; nonce++) {
         hasher = saved_state;
-        if (nonce >= nonce_max) { return std::nullopt; }
-        nonce++;
-
         cuda::std::array<uint8_t, 20> digitbuf = cuda::std::array<uint8_t, 20>();
 
         size_t digits = 1;
@@ -57,9 +54,11 @@ std::optional<mCaptchaResult> do_mCaptcha_singlethreaded_cpu(std::u8string_view 
         // the score is the first 16 bytes of the digest read as a big-endian integer
         s = 0;
         for (size_t i = 0; i < 16; i++) s = (s << 8) | hash[i];
+        if (s >= target) {
+            return mCaptchaResult{ nonce, s };
+        }
     }
-
-    return mCaptchaResult{ nonce, s };
+    return std::nullopt;
 }
 
 __device__ std::optional<__uint128_t> d_unit_of_work(cuda::std::span<const uint8_t> remaining_seed, uint64_t nonce, struct sha256state& partial_state, size_t bits_hashed_so_far, __uint128_t target) {
@@ -69,7 +68,8 @@ __device__ std::optional<__uint128_t> d_unit_of_work(cuda::std::span<const uint8
     assert(remaining_seed.size() <= max_remaining_seed);
 
     cuda::std::array<uint8_t, max_remaining_seed + max_nonce_digits> msg;
-    cuda::std::memcpy(msg.data(), remaining_seed.data(), remaining_seed.size());
+    if (!remaining_seed.empty())
+        cuda::std::memcpy(msg.data(), remaining_seed.data(), remaining_seed.size());
 
     size_t digits = 1;
     for (uint64_t n = nonce; n >= 10; n /= 10) digits++;
@@ -94,12 +94,12 @@ __device__ std::optional<__uint128_t> d_unit_of_work(cuda::std::span<const uint8
     // words is a big endian 256 bit number
     // convert the upper 128 bits to a little endian integer
     upper_bits =
-        static_cast<__uint128_t>(swap_endianness(result.d))       | 
-        static_cast<__uint128_t>(swap_endianness(result.c)) << 32 | 
-        static_cast<__uint128_t>(swap_endianness(result.b)) << 64 | 
-        static_cast<__uint128_t>(swap_endianness(result.a)) << 96;
+        static_cast<__uint128_t>(result.d)       | 
+        static_cast<__uint128_t>(result.c) << 32 | 
+        static_cast<__uint128_t>(result.b) << 64 | 
+        static_cast<__uint128_t>(result.a) << 96;
 
-    if (upper_bits >= target) {
+    if (upper_bits >= target /*&& upper_bits != static_cast<__uint128_t>(0)*/) {
         return upper_bits;
     }
     return std::nullopt;
@@ -153,13 +153,15 @@ std::optional<struct mCaptchaResult> do_mCaptcha_gpu(std::u8string_view salt, st
     hasher.Write(reinterpret_cast<const unsigned char*>(phrase.data()), 32);
 
     uint8_t* d_remaining_seed_buf = nullptr;
-    cudaMallocManaged(&d_remaining_seed_buf, sizeof(uint8_t) * bytes_in_last_chunk);
-    cuda::std::memcpy(d_remaining_seed_buf, &hasher.buf, bytes_in_last_chunk);
+    if (bytes_in_last_chunk > 0) {
+        cudaMallocManaged(&d_remaining_seed_buf, sizeof(uint8_t) * bytes_in_last_chunk);
+        cudaMemcpy(d_remaining_seed_buf, &hasher.buf, bytes_in_last_chunk, cudaMemcpyDefault);
+    }
     auto d_remaining_seed = cuda::std::span<const uint8_t>(d_remaining_seed_buf, bytes_in_last_chunk); 
 
     struct sha256state* d_partial_state = nullptr;
     cudaMallocManaged(&d_partial_state, sizeof(struct sha256state));
-    cuda::std::memcpy(d_partial_state, &hasher.s, sizeof(struct sha256state));
+    cudaMemcpy(d_partial_state, &hasher.s, sizeof(struct sha256state), cudaMemcpyDefault);
 
     int* d_found_flag = nullptr;
     cudaMallocManaged(&d_found_flag, sizeof(int));
