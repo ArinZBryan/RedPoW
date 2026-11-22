@@ -25,6 +25,8 @@ endif()
 
 find_package(CUDAToolkit REQUIRED)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Dependencies.cmake)
+
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu
@@ -41,7 +43,7 @@ list(FILTER LIB_SOURCES EXCLUDE REGEX "/src/main\\.cu$")
 
 add_library(RedPoWCore STATIC ${LIB_SOURCES} ${HEADERS})
 target_include_directories(RedPoWCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(RedPoWCore PUBLIC CUDA::cudart)
+target_link_libraries(RedPoWCore PUBLIC CUDA::cudart cpr::cpr lexbor::lexbor_static)
 
 add_executable(RedPoW ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cu)
 target_link_libraries(RedPoW PRIVATE RedPoWCore)
