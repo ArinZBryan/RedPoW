@@ -54,7 +54,20 @@ uint hash_countl_zero(cuda::std::span<const uint8_t, 32> hash) {
     return total_zeroes;
 }
 
-__device__ bool d_unit_of_work_js(cuda::std::span<const uint8_t> remaining_seed, uint64_t nonce, struct sha256state& partial_state, size_t bits_hashed_so_far, uint difficulty) {
+// SHA-256 digests are the state words written out big-endian, word a first
+static std::array<uint8_t, 32> state_to_digest(const struct sha256state& s) {
+    const uint32_t words[8] = { s.a, s.b, s.c, s.d, s.e, s.f, s.g, s.h };
+    std::array<uint8_t, 32> digest;
+    for (int i = 0; i < 8; i++) {
+        digest[i * 4 + 0] = static_cast<uint8_t>(words[i] >> 24);
+        digest[i * 4 + 1] = static_cast<uint8_t>(words[i] >> 16);
+        digest[i * 4 + 2] = static_cast<uint8_t>(words[i] >> 8);
+        digest[i * 4 + 3] = static_cast<uint8_t>(words[i]);
+    }
+    return digest;
+}
+
+__device__ bool d_unit_of_work_js(cuda::std::span<const uint8_t> remaining_seed, uint64_t nonce, struct sha256state& partial_state, size_t bits_hashed_so_far, uint difficulty, struct sha256state& out_hash) {
     
     // the nonce is appended to the seed as ASCII decimal digits (matches poc.py: seed + str(i))
     constexpr size_t max_nonce_digits = 20; // digits in UINT64_MAX
@@ -80,6 +93,8 @@ __device__ bool d_unit_of_work_js(cuda::std::span<const uint8_t> remaining_seed,
         bits_hashed_so_far
     );
 
+    out_hash = result;
+
     const cuda::std::array<uint32_t, 8> words = {
         result.a, result.b, result.c, result.d, result.e, result.f, result.g, result.h
     };
@@ -87,7 +102,7 @@ __device__ bool d_unit_of_work_js(cuda::std::span<const uint8_t> remaining_seed,
     return hash_countl_zero(cuda::std::span<const uint32_t, 8>(words)) >= difficulty;
 }
 
-__device__ bool d_unit_of_work_wasm(cuda::std::span<const uint8_t> remaining_seed, uint32_t nonce, struct sha256state& partial_state, size_t bits_hashed_so_far, uint difficulty, bool nonce_is_little_endian) {
+__device__ bool d_unit_of_work_wasm(cuda::std::span<const uint8_t> remaining_seed, uint32_t nonce, struct sha256state& partial_state, size_t bits_hashed_so_far, uint difficulty, bool nonce_is_little_endian, struct sha256state& out_hash) {
     
     // the nonce is appended to the seed as 4 raw bytes, little- or big-endian depending on the seed
     constexpr size_t max_remaining_seed = 64; // seed bytes left over after the full chunks were hashed
@@ -106,6 +121,8 @@ __device__ bool d_unit_of_work_wasm(cuda::std::span<const uint8_t> remaining_see
         bits_hashed_so_far
     );
 
+    out_hash = result;
+
     const cuda::std::array<uint32_t, 8> words = {
         result.a, result.b, result.c, result.d, result.e, result.f, result.g, result.h
     };
@@ -120,7 +137,8 @@ __global__ void k_work_js(
     size_t d_bits_hashed_so_far, 
     uint d_difficulty, 
     int* d_found_flag,
-    uint64_t* d_found_nonce
+    uint64_t* d_found_nonce,
+    struct sha256state* d_found_hash
 ) {
     size_t thread_id = THREAD_ID_1D;
     size_t stride = THREAD_COUNT_IN_GRID_1D;
@@ -130,10 +148,12 @@ __global__ void k_work_js(
             return;
         }
         
-        if (d_unit_of_work_js(d_remaining_seed, nonce, *d_partial_state, d_bits_hashed_so_far, d_difficulty)) {
+        struct sha256state hash;
+        if (d_unit_of_work_js(d_remaining_seed, nonce, *d_partial_state, d_bits_hashed_so_far, d_difficulty, hash)) {
             int someones_already_found_it = atomicCAS(d_found_flag, false, true);
             if (!someones_already_found_it) {
                 *d_found_nonce = nonce;
+                *d_found_hash = hash;
             }
             return;
         }
@@ -149,7 +169,8 @@ __global__ void k_work_wasm(
     uint d_difficulty, 
     bool d_nonce_is_little_endian,
     int* d_found_flag,
-    uint64_t* d_found_nonce
+    uint64_t* d_found_nonce,
+    struct sha256state* d_found_hash
 ) {
     size_t thread_id = THREAD_ID_1D;
     size_t stride = THREAD_COUNT_IN_GRID_1D;
@@ -159,17 +180,19 @@ __global__ void k_work_wasm(
             return;
         }
         
-        if (d_unit_of_work_wasm(d_remaining_seed, static_cast<uint32_t>(nonce), *d_partial_state, d_bits_hashed_so_far, d_difficulty, d_nonce_is_little_endian)) {
+        struct sha256state hash;
+        if (d_unit_of_work_wasm(d_remaining_seed, static_cast<uint32_t>(nonce), *d_partial_state, d_bits_hashed_so_far, d_difficulty, d_nonce_is_little_endian, hash)) {
             int someones_already_found_it = atomicCAS(d_found_flag, false, true);
             if (!someones_already_found_it) {
                 *d_found_nonce = nonce;
+                *d_found_hash = hash;
             }
             return;
         }
     }
 }
 
-std::optional<uint64_t> do_anubis_js_singlethreaded_cpu(const std::span<uint8_t>& seed, uint64_t nonce_max, uint32_t difficulty) {
+std::optional<AnubisResult> do_anubis_js_singlethreaded_cpu(const std::span<uint8_t>& seed, uint64_t nonce_max, uint32_t difficulty) {
     size_t seed_byte_length = seed.end() - seed.begin();
     
     size_t n_full_chunks = seed_byte_length / 64;
@@ -199,14 +222,14 @@ std::optional<uint64_t> do_anubis_js_singlethreaded_cpu(const std::span<uint8_t>
 
         hasher.Finalize(hash);
         if (hash_countl_zero(hash) >= difficulty) {
-            return nonce;
+            return AnubisResult{ nonce, std::to_array(hash) };
         }
     }
 
     return std::nullopt;
 }
 
-std::optional<uint64_t> do_anubis_js_gpu(const std::span<uint8_t>& seed, uint64_t nonce_max, uint32_t difficulty) {
+std::optional<AnubisResult> do_anubis_js_gpu(const std::span<uint8_t>& seed, uint64_t nonce_max, uint32_t difficulty) {
     size_t seed_byte_length = seed.end() - seed.begin();
     
     size_t n_full_chunks = seed_byte_length / 64;
@@ -233,6 +256,9 @@ std::optional<uint64_t> do_anubis_js_gpu(const std::span<uint8_t>& seed, uint64_
     uint64_t* d_found_nonce = nullptr;
     cudaMallocManaged(&d_found_nonce, sizeof(uint64_t));
 
+    struct sha256state* d_found_hash = nullptr;
+    cudaMallocManaged(&d_found_hash, sizeof(struct sha256state));
+
     auto[gridSize, blockSize] = getBestBigKernelLaunchParams(k_work_js);
 
     k_work_js<<<gridSize, blockSize>>>(
@@ -242,25 +268,27 @@ std::optional<uint64_t> do_anubis_js_gpu(const std::span<uint8_t>& seed, uint64_
         n_full_chunks * 64 * 8,
         difficulty,
         d_found_flag,
-        d_found_nonce
+        d_found_nonce,
+        d_found_hash
     );
 
     cudaDeviceSynchronize();
 
-    std::optional<uint64_t> result = std::nullopt;
+    std::optional<AnubisResult> result = std::nullopt;
     if (*d_found_flag) {
-        result = *d_found_nonce;
+        result = AnubisResult{ *d_found_nonce, state_to_digest(*d_found_hash) };
     }
 
     cudaFree(d_remaining_seed_buf);
     cudaFree(d_partial_state);
     cudaFree(d_found_flag);
     cudaFree(d_found_nonce);
+    cudaFree(d_found_hash);
 
     return result;
 }
 
-std::optional<uint64_t> do_anubis_wasm_singlethreaded_cpu(const std::span<uint8_t>& seed, uint32_t nonce_max, uint32_t difficulty) {
+std::optional<AnubisResult> do_anubis_wasm_singlethreaded_cpu(const std::span<uint8_t>& seed, uint32_t nonce_max, uint32_t difficulty) {
     size_t seed_byte_length = seed.end() - seed.begin();
     bool nonce_is_little_endian = seed.empty() ? false : seed[seed.size() - 1] >= 128;
     size_t n_full_chunks = seed_byte_length / 64;
@@ -281,14 +309,14 @@ std::optional<uint64_t> do_anubis_wasm_singlethreaded_cpu(const std::span<uint8_
 
         hasher.Finalize(hash);
         if (hash_countl_zero(hash) >= difficulty) {
-            return nonce;
+            return AnubisResult{ nonce, std::to_array(hash) };
         }
     }
 
     return std::nullopt;
 }
 
-std::optional<uint64_t> do_anubis_wasm_gpu(const std::span<uint8_t>& seed, uint32_t nonce_max, uint32_t difficulty) {
+std::optional<AnubisResult> do_anubis_wasm_gpu(const std::span<uint8_t>& seed, uint32_t nonce_max, uint32_t difficulty) {
     size_t seed_byte_length = seed.end() - seed.begin();
     bool nonce_is_little_endian = seed.empty() ? false : seed[seed.size() - 1] >= 128;
 
@@ -316,6 +344,9 @@ std::optional<uint64_t> do_anubis_wasm_gpu(const std::span<uint8_t>& seed, uint3
     uint64_t* d_found_nonce = nullptr;
     cudaMallocManaged(&d_found_nonce, sizeof(uint64_t));
 
+    struct sha256state* d_found_hash = nullptr;
+    cudaMallocManaged(&d_found_hash, sizeof(struct sha256state));
+
     auto[gridSize, blockSize] = getBestBigKernelLaunchParams(k_work_wasm);
 
     k_work_wasm<<<gridSize, blockSize>>>(
@@ -326,20 +357,22 @@ std::optional<uint64_t> do_anubis_wasm_gpu(const std::span<uint8_t>& seed, uint3
         difficulty,
         nonce_is_little_endian,
         d_found_flag,
-        d_found_nonce
+        d_found_nonce,
+        d_found_hash
     );
 
     cudaDeviceSynchronize();
 
-    std::optional<uint64_t> result = std::nullopt;
+    std::optional<AnubisResult> result = std::nullopt;
     if (*d_found_flag) {
-        result = *d_found_nonce;
+        result = AnubisResult{ *d_found_nonce, state_to_digest(*d_found_hash) };
     }
 
     cudaFree(d_remaining_seed_buf);
     cudaFree(d_partial_state);
     cudaFree(d_found_flag);
     cudaFree(d_found_nonce);
+    cudaFree(d_found_hash);
 
     return result;
 }

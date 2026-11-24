@@ -37,15 +37,15 @@ file(GLOB_RECURSE HEADERS CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cuh
 )
 
-# Everything except main.cu goes into a library so the tests can link against it.
+# Everything except main.cpp goes into a library so the tests can link against it.
 set(LIB_SOURCES ${SOURCES})
-list(FILTER LIB_SOURCES EXCLUDE REGEX "/src/main\\.cu$")
+list(FILTER LIB_SOURCES EXCLUDE REGEX "/src/main\\.cpp$")
 
 add_library(RedPoWCore STATIC ${LIB_SOURCES} ${HEADERS})
 target_include_directories(RedPoWCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(RedPoWCore PUBLIC CUDA::cudart cpr::cpr lexbor::lexbor_static)
 
-add_executable(RedPoW ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cu)
+add_executable(RedPoW ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
 target_link_libraries(RedPoW PRIVATE RedPoWCore)
 
 foreach(tgt RedPoWCore RedPoW)
@@ -54,8 +54,10 @@ foreach(tgt RedPoWCore RedPoW)
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
     target_compile_options(${tgt} PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -lineinfo>
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        # -G (full device debug info) and -lineinfo conflict, so pick one per config.
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<CONFIG:Debug>>>:-lineinfo>
     )
 endforeach()
 
